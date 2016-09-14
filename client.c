@@ -23,7 +23,7 @@
 #define STDIN 0
 
 
-int *setup_talk_con(char *node, char *port, int *sock_fds);
+int setup_talk_con(char *node, char *port, int *sock_fds);
 void pgets(char *str, ssize_t siz);
 void cli_loop(const int *sock_fds, char *nick_name);
 void *get_in_addr(struct sockaddr *sa);
@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Setup recv connection
-  if ( (setup_talk_con(ADDRESS, PORT1, &sock_fds[0])) == NULL)
+  if ( (setup_talk_con(ADDRESS, PORT1, &sock_fds[0])) == -1)
     exit(EXIT_FAILURE);
 
   memset(&s_cap, 0, sizeof s_cap);
@@ -54,7 +54,7 @@ int main(int argc, char *argv[]) {
 
   // Setup send connection
   if (s_cap.signal == PING) {
-    if ( (setup_talk_con(ADDRESS, s_cap.content, &sock_fds[1])) == NULL) {
+    if ( (setup_talk_con(ADDRESS, s_cap.content, &sock_fds[1])) == -1) {
       fprintf(stderr,"Could not establish write connection\n");
       exit(EXIT_FAILURE);
     }
@@ -84,7 +84,7 @@ void cli_loop(const int *sock_fds, char *nick_name) {
   int num_sent_bytes = 0;
   m_capsule rcap, scap = {0}; // recv-, send-capsule
   fd_set read_fds, set_fds;
-  struct timeval tv, set_tv = { .tv_sec = 0, .tv_usec = 200000 };
+  struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 200000 };
   volatile int mfds = 0;
 
   strncpy(scap.origin, nick_name, sizeof nick_name);
@@ -97,8 +97,8 @@ void cli_loop(const int *sock_fds, char *nick_name) {
   while(1) {
     // Initialize select() arguments
     read_fds = set_fds;
-    tv = set_tv;
-    mfds = select(sock_fds[0] +1, &read_fds, NULL, NULL, &tv);
+    read_tv = set_tv;
+    mfds = select(sock_fds[0] +1, &read_fds, NULL, NULL, &read_tv);
 
     // Error check
     if (mfds == -1) {
@@ -157,12 +157,10 @@ void client_free(int *sock_fds) {
   close(sock_fds[1]);
 }
 
-int *setup_talk_con(char *node, char *port, int *sock_fds) {
+int setup_talk_con(char *node, char *port, int *sock_fds) {
   struct addrinfo hints, *servinfo, *p;
   int rv;
   char s[INET6_ADDRSTRLEN];
-
-  //sock_fds = malloc(sizeof sock_fds);
 
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_UNSPEC;
@@ -170,8 +168,7 @@ int *setup_talk_con(char *node, char *port, int *sock_fds) {
 
   if ((rv = getaddrinfo(node, port, &hints, &servinfo)) != 0) {
     fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-    //free(sock_fds);
-    return NULL;
+    return -1;
   }
 
   // loop through all the results and connect to the first we can
@@ -191,7 +188,7 @@ int *setup_talk_con(char *node, char *port, int *sock_fds) {
 
   if (p == NULL) {
     fprintf(stderr, "client: failed to connect\n");
-    return NULL;
+    return -1;
   }
 
   inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
@@ -200,7 +197,7 @@ int *setup_talk_con(char *node, char *port, int *sock_fds) {
 
   freeaddrinfo(servinfo); // all done with this structure
 
-  return sock_fds;
+  return 0;
 }
 
 // Get sockaddr, IPv4 or IPv6:
