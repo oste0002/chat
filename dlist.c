@@ -108,7 +108,6 @@ dlist_position dlist_moveToFront(dlist *l,dlist_position p) {
   dlist_position temp=p->next;
   p->next=p->next->next;
   temp->next=l->head->next;
-  // l->head=temp;
   l->head->next = temp;
   return temp;
 }
@@ -150,7 +149,7 @@ Returvärde: true om p är positionen efter sista värdet, false annars.
 Kommentarer:
 */
 bool dlist_isEnd(dlist *l,dlist_position p) {
-   return (p->next==NULL);
+   return ((p == NULL) || (p->next==NULL));
 }
 
 /*

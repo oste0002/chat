@@ -22,22 +22,21 @@
 #define PORT2 "15002"  // Port
 #define BACKLOG 10     // Max number of pending connections
 #define MAXCON 100     // Max number of allowed connections
-#define STDIN 0
 
-int *setup_serv_con(int *sock_fd, char *port);
-int accept_con(int *listen_sock_fd, fd_set *read_fds, dlist *cli_list,
+int setup_serv_con(int *sock_fd, char *port);
+int accept_con(char *argv[], int *listen_sock_fd, fd_set *read_fds, dlist *cli_list,
 		int nfds);
 void *get_in_addr(struct sockaddr *sa);
 void sigchld_handler(int s);
-void serv_loop(int *listen_sock_fd);
+void serv_loop(char *argv[], int *listen_sock_fd_ptr);
 void child_proc(int *sock_fd, int pipe_fd[2]);
 void free_chld(dlist_position p, dlist *l, fd_set *s);
 
-int main(void) {
+int main(int argc, char *argv[]) {
 	int listen_sock_fd = 0;
 
 	// Open link
-	if ((setup_serv_con(&listen_sock_fd, PORT1)) == 0)
+	if ((setup_serv_con(&listen_sock_fd, PORT1)) < 0)
 		exit(EXIT_FAILURE);
 
 	// Listen
@@ -49,12 +48,150 @@ int main(void) {
 	printf("server: waiting for connections...\n");
 
 	// Main loop of server
-	serv_loop(&listen_sock_fd);
+	serv_loop(argv, &listen_sock_fd);
 	close(listen_sock_fd);
 	exit(EXIT_SUCCESS);
 }
 
-int *setup_serv_con(int *sock_fd, char *port) {
+void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
+	int *pipe_fd;
+	dlist *cli_list;
+	char buf_ch;
+	struct timeval read_tv, set_tv = { .tv_sec = 1, .tv_usec = 0 };
+	fd_set read_fds, set_fds;
+	int nact = 0, nfds = 0, nfds_tmp;
+	int mfds = 0;
+	dlist_position p, q;
+	m_capsule m_cap;
+	int num_read_bytes = 0;      // Number of read bytes
+	int num_writ_bytes = 0;      // Number of written bytes
+
+	// Define linked list of clients
+	cli_list = dlist_empty();
+	dlist_setMemHandler(cli_list, free);
+
+	// Define file descriptor set and add listening socket
+	FD_ZERO(&set_fds);
+	FD_SET(STDIN_FILENO, &set_fds);
+	FD_SET(*listen_sock_fd_ptr, &set_fds);
+
+	nfds = *listen_sock_fd_ptr + 1;
+
+	while(1) {
+
+		read_fds = set_fds;
+		read_tv = set_tv;
+		mfds = select(nfds, &read_fds, NULL, NULL, &read_tv);
+		nact = 0;
+
+		// Exit on ESC
+		if (FD_ISSET(STDIN_FILENO, &read_fds)) {
+			nact++;
+			// printf("some key is pressed\n");
+			while ( (buf_ch = getchar()) == '\n' || (buf_ch == EOF));
+
+			if (buf_ch == 27) {
+				printf("ESC is pressed\n");
+				m_cap.signal = CLOSE;
+				for (p = dlist_first(cli_list);
+						p != NULL && !dlist_isEnd(cli_list, p);
+						p = dlist_next(cli_list, p)) {
+
+					pipe_fd = dlist_inspect(cli_list, p);
+
+					// Send close signal to children
+					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
+									sizeof(m_cap))) == -1 )
+						perror("server write 'CLOSE' to child");
+
+					free_chld(p, cli_list, &set_fds);
+				}
+				dlist_free(cli_list);
+				break;
+			}
+
+			// Flush stdin
+			while ( ((buf_ch = getchar()) != '\n') && buf_ch != EOF );
+		}
+
+		// Error check
+		if (mfds == -1) {
+			if (strcmp(strerror(errno),"EINTR"))
+				continue;
+			perror("server select");
+			dlist_free(cli_list);
+			exit(EXIT_FAILURE);
+		}
+
+
+		// Restart loop if no fd is set
+		if (mfds == 0)
+			continue;
+
+
+		// Test if listen_sock_fd is set i.e. a new client attempts to connect,
+		// then accept the connection.
+		if (FD_ISSET(*listen_sock_fd_ptr, &read_fds)) {
+			if ( (nfds_tmp = accept_con(argv, listen_sock_fd_ptr,
+							&set_fds, cli_list, nfds)) > nfds )
+				nfds = nfds_tmp;
+
+
+			printf("accept_con() successfully returned\n");
+			printf("nsdf: %d\n",nfds);
+			nact++;
+			continue;
+		}
+
+
+		// Distribute messages
+
+		for ( p = dlist_first(cli_list);
+				((!dlist_isEnd(cli_list, p)) && (nact != mfds)); ) {
+
+			pipe_fd = dlist_inspect(cli_list, p);
+
+			// Test if child is set
+			if (FD_ISSET(pipe_fd[0], &read_fds)) {
+
+				nact++;
+
+				q = p;
+				p = dlist_next(cli_list, p);
+				dlist_moveToFront(cli_list, q);
+
+				// Receive message
+				if ( (num_read_bytes = read(pipe_fd[0], &m_cap,
+								sizeof(m_capsule))) == -1 )
+					perror("server receive from child");
+					printf("receive\n");
+
+				// Close on signal 'CLOSE'
+				if ( m_cap.signal == CLOSE ) {
+					free_chld(q, cli_list, &set_fds);
+					continue;
+				}
+
+				// Transfer message
+				for (q = dlist_next(cli_list, q);
+						!dlist_isEnd(cli_list, q);
+						q = dlist_next(cli_list, q)) {
+
+					printf("send\n");
+					pipe_fd = dlist_inspect(cli_list, q);
+					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
+									sizeof(m_cap))) == -1 )
+						perror("server send to child");
+				}
+			}
+			else
+				p = dlist_next(cli_list, p);
+		}
+	}
+	return;
+}
+
+int setup_serv_con(int *sock_fd, char *port) {
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
 	int yes=1;
@@ -66,10 +203,10 @@ int *setup_serv_con(int *sock_fd, char *port) {
 
 	if ((rv = getaddrinfo(NULL, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return NULL;
+		return -1;
 	}
 
-	// Create socket and bind it to port
+	// Create socket
 	for(p = servinfo; p != NULL; p = p->ai_next) {
 		if ((*sock_fd = socket(p->ai_family, p->ai_socktype,
 						p->ai_protocol)) == -1) {
@@ -103,212 +240,21 @@ int *setup_serv_con(int *sock_fd, char *port) {
 
 	freeaddrinfo(servinfo);
 
-	return sock_fd;
+	return 0;
 }
 
-void serv_loop(int *listen_sock_fd) {
-	int *pipe_fd;
-	dlist *cli_list;
-	char buf_ch;
-	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 50000 };
-	//struct timeval read_tv, set_tv = { .tv_sec = 1, .tv_usec = 0 };
-	fd_set read_fds, set_fds;
-	int nact = 0, nfds = 0, nfds_tmp;
-	volatile int mfds = 0;
-	dlist_position p, q;
-	m_capsule m_cap;
-	int num_read_bytes = 0;      // Number of read bytes
-	int num_writ_bytes = 0;      // Number of written bytes
-	//bool loop = true;
+int accept_con(char *argv[], int *listen_sock_fd, fd_set *set_fds,
+		dlist *cli_list, int nfds) {
 
-	// Define linked list of clients
-	cli_list = dlist_empty();
-	dlist_setMemHandler(cli_list, free);
-
-	// Define file descriptor set and add listening socket
-	FD_ZERO(&set_fds);
-	FD_SET(STDIN, &set_fds);
-	FD_SET(*listen_sock_fd, &set_fds);
-
-	nfds = *listen_sock_fd + 1;
-
-	while(1) {
-
-		read_fds = set_fds;
-		read_tv = set_tv;
-
-		mfds = select(nfds, &read_fds, NULL, NULL, &read_tv);
-
-
-		// BEGIN TEST
-		/*
-		{
-			if (FD_ISSET(*listen_sock_fd, &read_fds))
-				printf("listen_sock is set\n");
-			else
-				printf("listen_sock is not set\n");
-
-			p = dlist_first(cli_list);
-			while ( (!dlist_isEnd(cli_list, p)) && (nact != mfds) ) {
-				printf("testing\n");
-				pipe_fd = dlist_inspect(cli_list, p);
-				if (FD_ISSET(pipe_fd[0], &read_fds))
-					printf("pipe still set\n");
-				p = dlist_next(cli_list, p);
-			}
-			select(nfds, NULL, NULL, NULL, &read_tv);
-		}
-		*/
-		// END TEST
-
-		// Exit on ESC
-		if (FD_ISSET(STDIN, &read_fds)) {
-			if ( (buf_ch = getchar() )!= '\n');
-			if (buf_ch == 27) {
-				printf("ESC is pressed\n");
-				m_cap.signal = CLOSE;
-				for (p = dlist_first(cli_list);
-						!dlist_isEnd(cli_list, p);
-						p = dlist_next(cli_list, p)) {
-
-					pipe_fd = dlist_inspect(cli_list, p);
-
-					// Write
-					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
-									sizeof(m_cap))) == -1 )
-						perror("server write 'CLOSE' to child");
-
-					free_chld(p, cli_list, &set_fds);
-				}
-
-				dlist_free(cli_list);
-				break;
-			}
-		}
-
-		// Error check
-		if (mfds == -1) {
-			if (strcmp(strerror(errno),"EINTR"))
-				continue;
-			perror("server select");
-			dlist_free(cli_list);
-			exit(EXIT_FAILURE);
-		}
-
-		// Restart loop if no fd is set
-		if (mfds == 0)
-			continue;
-
-		nact = 0;
-
-
-
-
-
-		// Test if listen_sock_fd is set i.e. a new client attempts to connect,
-		// then accept the connection.
-		if (FD_ISSET(*listen_sock_fd, &read_fds)) {
-			if ( (nfds_tmp = accept_con(listen_sock_fd,
-							&set_fds, cli_list, nfds)) > nfds)
-				nfds = nfds_tmp;
-
-
-
-
-
-			// BEGIN TEST
-			read_tv = set_tv;
-			read_fds = set_fds;
-
-			select(nfds, &read_fds, NULL, NULL, &read_tv);
-			if (FD_ISSET(*listen_sock_fd, &read_fds))
-				printf("parent: after accept_con(), listen_sock is set\n");
-			else
-				printf("parent: after accept_con(), listen_sock is not set\n");
-
-			select(nfds, &read_fds, NULL, NULL, &read_tv);
-			// END TEST
-
-
-
-
-
-			printf("accept_con() successfully returned\n");
-			printf("nsdf: %d\n",nfds);
-			nact++;
-			continue;
-		}
-
-
-		// Distribute messages
-		p = dlist_first(cli_list);
-
-		while ( (!dlist_isEnd(cli_list, p)) && (nact != mfds) ) {
-
-			pipe_fd = dlist_inspect(cli_list, p);
-
-			if (FD_ISSET(pipe_fd[0], &read_fds)) {
-				q = p;
-				p = dlist_next(cli_list, p);
-				dlist_moveToFront(cli_list, q);
-				nact++;
-
-				if ( (num_read_bytes = read(pipe_fd[0], &m_cap,
-								sizeof(m_capsule))) == -1 )
-					perror("server receive from child");
-
-				// Close on signal 'CLOSE'
-				if ( m_cap.signal == CLOSE ) {
-					free_chld(q, cli_list, &set_fds);
-				}
-
-				// Transfer message
-				for (; !dlist_isEnd(cli_list, q); q = dlist_next(cli_list, q)) {
-
-					pipe_fd = dlist_inspect(cli_list, q);
-					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
-									sizeof(m_cap))) == -1 )
-						perror("server send to child");
-				}
-			} else
-				p = dlist_next(cli_list, p);
-		}
-
-
-	}
-	return;
-}
-
-int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) {
 	int client_sock_fd[2], listen_sock_fd2 = 0;
 	int *pipe_fd, pipe_fd1[2], pipe_fd2[2];
 	char s[INET6_ADDRSTRLEN];
+	//char STDBUF[BUFSIZ];
 	struct sockaddr_storage their_addr;
 	int num_writ_bytes = 0;
 	socklen_t sin_size = sizeof their_addr;
-	s_capsule s_cap; // Set up send connection
+	s_capsule s_cap;
 	struct sigaction sa;
-
-
-
-
-
-
-	// BEGIN TEST
-	fd_set read_fds;		// TESTING ****************************
-	struct timeval read_tv, set_tv = { .tv_sec = 1, .tv_usec = 0 };
-	read_fds = *set_fds;
-	read_tv = set_tv;
-
-	select(nfds, &read_fds, NULL, NULL, &read_tv);
-	if (FD_ISSET(*listen_sock_fd, &read_fds))
-		printf("parent: before accept(), listen_sock is set\n");
-	else
-		printf("parent: before accept(), listen_sock is not set\n");
-	// END TEST
-
-
-
 
 	// Set up write connection
 	client_sock_fd[1] = accept(*listen_sock_fd,
@@ -317,26 +263,11 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) 
 		perror("accept send sock");
 		exit(EXIT_FAILURE);
 	}
-
-
-
-	// BEGIN TEST
-	read_fds = *set_fds;
-	select(nfds, &read_fds, NULL, NULL, &read_tv);
-	if (FD_ISSET(*listen_sock_fd, &read_fds))
-		printf("parent: after accept(), listen_sock is set\n");
-	else
-		printf("parent: after accept(), listen_sock is not set\n");
-
-	select(nfds, &read_fds, NULL, NULL, &read_tv);
-	// END TEST
-
-
 	printf("parent: write connection is set\n");
 
 
 	// Open new link for read connection on PORT2
-	if ((setup_serv_con(&listen_sock_fd2, PORT2)) == 0)
+	if ((setup_serv_con(&listen_sock_fd2, PORT2)) < 0)
 		exit(EXIT_FAILURE);
 
 	// Start to listen for read connection
@@ -367,10 +298,6 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) 
 
 	printf("parent: read connection is set\n");
 
-
-
-
-
 	// Close the recently opened socket
 	close(listen_sock_fd2);
 
@@ -395,7 +322,8 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) 
 	printf("Pipes are set\n");
 
 	// Setup zombie reaper
-	sa.sa_handler = sigchld_handler;
+	//sa.sa_handler = sigchld_handler;
+	sa.sa_handler = SIG_IGN;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_RESTART;
 	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
@@ -416,9 +344,6 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) 
 	 *	pipe_fd[0]			  read
 	 *	pipe_fd[1]			  write
 	 */
-
-
-
 	// Create child process
 	if (!fork()) {
 
@@ -448,7 +373,10 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *cli_list, int nfds) 
 		close(pipe_fd[1]);
 		free(pipe_fd);
 		printf("connection from %s has been closed\n", s);
-		return 0;
+
+		execvp(argv[1], argv + 1); 
+		perror("execvp");
+		_Exit(EXIT_FAILURE);
 	}
 	printf("parent: child process is set\n");
 
@@ -500,9 +428,10 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 
 		// Error check
 		if (mfds == -1) {
-			if (strcmp(strerror(errno),"EINTR"))
-				fprintf(stderr,"select: EINTR\n");
-			continue;
+			if (strcmp(strerror(errno),"EINTR")) {
+				fprintf(stderr,"child select: EINTR\n");
+				continue;
+			}
 			perror("child select");
 			return;
 		}
@@ -565,7 +494,17 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 	}
 }
 
-// free_chld()
+
+
+
+
+
+
+
+
+
+
+
 /* l: (dlist *) - A dlist_ptr containing elements of (int)pipe[2]
  * p: (dlist_position) - Position in l
  * s: (fd_set *) - pipe[0] is removed from this set
@@ -575,18 +514,13 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
  * - Closes and frees pipes
  */
 void free_chld(dlist_position p, dlist *l, fd_set *s) {
-	int *pipe_fd;
-
-	pipe_fd = dlist_inspect(l, p);
+	int *pipe_fd = dlist_inspect(l, p);
 	FD_CLR(pipe_fd[0], s);
 	close(pipe_fd[0]);
 	close(pipe_fd[1]);
-	//dlist_remove(l, p);
-	//free(pipe_fd);
+	dlist_remove(l, p);
 	return;
 }
-
-
 
 // Get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa) {

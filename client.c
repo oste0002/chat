@@ -1,4 +1,3 @@
-
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
@@ -85,7 +84,7 @@ void cli_loop(const int *sock_fds, char *nick_name) {
   m_capsule rcap, scap = {0}; // recv-, send-capsule
   fd_set read_fds, set_fds;
   struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 200000 };
-  volatile int mfds = 0;
+  int mfds = 0;
 
   strncpy(scap.origin, nick_name, sizeof nick_name);
 
@@ -152,11 +151,6 @@ void cli_loop(const int *sock_fds, char *nick_name) {
   }
 }
 
-void client_free(int *sock_fds) {
-  close(sock_fds[0]);
-  close(sock_fds[1]);
-}
-
 int setup_talk_con(char *node, char *port, int *sock_fds) {
   struct addrinfo hints, *servinfo, *p;
   int rv;
@@ -200,6 +194,13 @@ int setup_talk_con(char *node, char *port, int *sock_fds) {
   return 0;
 }
 
+
+
+
+void client_free(int *sock_fds) {
+  close(sock_fds[0]);
+  close(sock_fds[1]);
+}
 // Get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa) {
   if (sa->sa_family == AF_INET) {
@@ -208,7 +209,6 @@ void *get_in_addr(struct sockaddr *sa) {
 
   return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-
 
 /* pgets - (overflow) protected gets
  *  char *str - pointer to string
