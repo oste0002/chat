@@ -66,7 +66,7 @@ Parametrar: l - listan
 Returvärde: positionen för efterföljaren
 Kommentarer: Odefinierad för end positionen
 */
-dlist_position dlist_next(dlist *l, dlist_position p) {
+dlist_position dlist_next(dlist_position p) {
    return p->next;
 }
 
@@ -88,7 +88,7 @@ Parametrar: l - listan
 Returvärde: Positionen för det nyinsatta värdet.
 Kommentarer: p bör ej användas efter anropet
 */
-dlist_position dlist_insert(dlist *l,dlist_position p,data d) {
+dlist_position dlist_insert(dlist_position p,data d) {
    dlist_position newPosition=malloc(sizeof(element));
    newPosition->data=d;
 
@@ -105,11 +105,12 @@ Parametrar: l - listan
 Returvärde: Första positionen i listan
 */
 dlist_position dlist_moveToFront(dlist *l,dlist_position p) {
-  dlist_position temp=p->next;
+
+  dlist_position t=p->next;
   p->next=p->next->next;
-  temp->next=l->head->next;
-  l->head->next = temp;
-  return temp;
+  t->next=l->head->next;
+  l->head->next = t;
+  return l->head;
 }
 
 /*
@@ -136,7 +137,7 @@ Parametrar: l - listan
 Returvärde: värdet som fanns på positionen p
 Kommentarer:
 */
-data dlist_inspect(dlist *l, dlist_position p) {
+data dlist_inspect(dlist_position p) {
     return p->next->data;
 }
 
@@ -148,8 +149,18 @@ Parametrar: l - listan
 Returvärde: true om p är positionen efter sista värdet, false annars.
 Kommentarer:
 */
-bool dlist_isEnd(dlist *l,dlist_position p) {
-   return ((p == NULL) || (p->next==NULL));
+bool dlist_isEnd(dlist_position p) {
+   return (p->next==NULL);
+}
+
+/*
+Syfte: Kolla om en given position är giltig
+Parametrar:p - positionen man vill kontrollera om den är giltig
+Returvärde: true om p är giltig, false annars.
+Kommentarer:
+*/
+bool dlist_isValid(dlist_position p) {
+   return (p!=NULL);
 }
 
 /*

@@ -84,7 +84,7 @@ Parametrar: l - listan
 Returvärde: positionen för efterföljaren
 Kommentarer: Odefinierad för end positionen
 */
-dlist_position dlist_next(dlist *l,dlist_position p);
+dlist_position dlist_next(dlist_position p);
 
 /*
 Syfte: Kontrollera om listan är tom.
@@ -93,6 +93,14 @@ Returvärde: true om listan är tom, false annars
 Kommentarer:
 */
 bool dlist_isEmpty(dlist *l);
+
+/*
+Syfte: Kolla om en given position är giltig
+Parametrar:p - positionen man vill kontrollera om den är giltig
+Returvärde: true om p är giltig, false annars.
+Kommentarer:
+*/
+bool dlist_isValid(dlist_position p);
 
 /*
 Syfte: Flytta en länk längst fram i listan
@@ -111,7 +119,7 @@ Returvärde: Positionen för det nyinsatta värdet.
 Kommentarer: p bör ej användas efter anropet
 */
 
-dlist_position dlist_insert(dlist *l,dlist_position p,data d);
+dlist_position dlist_insert(dlist_position p,data d);
 
 /*
 Syfte: Ta bort ett värde på en given position i listan
@@ -140,7 +148,7 @@ Parametrar: l - listan
 Returvärde: värdet som fanns på positionen p
 Kommentarer:
 */
-data dlist_inspect(dlist *l, dlist_position p);
+data dlist_inspect(dlist_position p);
 
 /*
 Syfte: Kolla om en given position är positionen efter det sista värdet i listan
@@ -149,6 +157,6 @@ Parametrar: l - listan
 Returvärde: true om p är positionen efter sista värdet, false annars.
 Kommentarer:
 */
-bool dlist_isEnd(dlist *l, dlist_position p);
+bool dlist_isEnd(dlist_position p);
 
 #endif

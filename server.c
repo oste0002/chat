@@ -17,6 +17,7 @@
 
 #include "capsule.h"
 #include "dlist.h"
+#include "psutils.h"
 
 #define PORT1 "15001"  // Port
 #define PORT2 "15002"  // Port
@@ -65,6 +66,7 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 	m_capsule m_cap;
 	int num_read_bytes = 0;      // Number of read bytes
 	int num_writ_bytes = 0;      // Number of written bytes
+	dlist_position test_i;
 
 	// Define linked list of clients
 	cli_list = dlist_empty();
@@ -87,17 +89,18 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 		// Exit on ESC
 		if (FD_ISSET(STDIN_FILENO, &read_fds)) {
 			nact++;
-			// printf("some key is pressed\n");
-			while ( (buf_ch = getchar()) == '\n' || (buf_ch == EOF));
+
+			//protected getchar
+			pgetc(&buf_ch);
 
 			if (buf_ch == 27) {
 				printf("ESC is pressed\n");
 				m_cap.signal = CLOSE;
 				for (p = dlist_first(cli_list);
-						p != NULL && !dlist_isEnd(cli_list, p);
-						p = dlist_next(cli_list, p)) {
+						dlist_isValid(p) && !dlist_isEnd(p);
+						p = dlist_next(p)) {
 
-					pipe_fd = dlist_inspect(cli_list, p);
+					pipe_fd = dlist_inspect(p);
 
 					// Send close signal to children
 					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
@@ -109,9 +112,6 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 				dlist_free(cli_list);
 				break;
 			}
-
-			// Flush stdin
-			while ( ((buf_ch = getchar()) != '\n') && buf_ch != EOF );
 		}
 
 		// Error check
@@ -136,8 +136,7 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 							&set_fds, cli_list, nfds)) > nfds )
 				nfds = nfds_tmp;
 
-
-			printf("accept_con() successfully returned\n");
+			printf("Pipe address: %d\n",dlist_inspect(dlist_first(cli_list)));
 			printf("nsdf: %d\n",nfds);
 			nact++;
 			continue;
@@ -147,24 +146,30 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 		// Distribute messages
 
 		for ( p = dlist_first(cli_list);
-				((!dlist_isEnd(cli_list, p)) && (nact != mfds)); ) {
+				( dlist_isValid(p) && !dlist_isEnd(p) && (nact < mfds) );
+				p=dlist_next(p)) {
 
-			pipe_fd = dlist_inspect(cli_list, p);
+			pipe_fd = dlist_inspect(p);
 
 			// Test if child is set
 			if (FD_ISSET(pipe_fd[0], &read_fds)) {
-
 				nact++;
 
 				q = p;
-				p = dlist_next(cli_list, p);
-				dlist_moveToFront(cli_list, q);
+				//	if (!dlist_isEnd(p))
+				//		p = dlist_next(p);
+
+				//	printf("\nBefore:\n");
+				//	for (test_i=dlist_first(cli_list);
+				//			(!dlist_isEnd(test_i));
+				//			test_i=dlist_next(test_i)) {
+				//		printf("%d\n",dlist_inspect(test_i));
+				//	}
 
 				// Receive message
 				if ( (num_read_bytes = read(pipe_fd[0], &m_cap,
 								sizeof(m_capsule))) == -1 )
 					perror("server receive from child");
-					printf("receive\n");
 
 				// Close on signal 'CLOSE'
 				if ( m_cap.signal == CLOSE ) {
@@ -172,20 +177,28 @@ void serv_loop(char *argv[], int *listen_sock_fd_ptr) {
 					continue;
 				}
 
-				// Transfer message
-				for (q = dlist_next(cli_list, q);
-						!dlist_isEnd(cli_list, q);
-						q = dlist_next(cli_list, q)) {
+				q=dlist_moveToFront(cli_list, q);
 
-					printf("send\n");
-					pipe_fd = dlist_inspect(cli_list, q);
+				//	printf("After:\n");
+				//	for (test_i=dlist_first(cli_list);
+				//			(!dlist_isEnd(test_i));
+				//			test_i=dlist_next(test_i)) {
+				//		printf("%d\n",dlist_inspect(test_i));
+				//	}
+				//	printf("\n%d\n",dlist_inspect(q));
+
+
+				// Transfer message
+				for (q = dlist_next(q);
+						dlist_isValid(q) && !dlist_isEnd(q);
+						q = dlist_next(q)) {
+
+					pipe_fd = dlist_inspect(q);
 					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
 									sizeof(m_cap))) == -1 )
 						perror("server send to child");
 				}
 			}
-			else
-				p = dlist_next(cli_list, p);
 		}
 	}
 	return;
@@ -374,7 +387,7 @@ int accept_con(char *argv[], int *listen_sock_fd, fd_set *set_fds,
 		free(pipe_fd);
 		printf("connection from %s has been closed\n", s);
 
-		execvp(argv[1], argv + 1); 
+		execvp(argv[1], argv + 1);
 		perror("execvp");
 		_Exit(EXIT_FAILURE);
 	}
@@ -389,14 +402,16 @@ int accept_con(char *argv[], int *listen_sock_fd, fd_set *set_fds,
 	}
 	pipe_fd[0] = pipe_fd2[0];
 	pipe_fd[1] = pipe_fd1[1];
+	printf("Pipe address: %d\n",pipe_fd);
 	close(pipe_fd1[0]);
 	close(pipe_fd2[1]);
 
 	FD_SET(pipe_fd[0], set_fds);
-	dlist_insert(cli_list, dlist_first(cli_list), pipe_fd);
+	dlist_insert(dlist_first(cli_list), pipe_fd);
 	if (pipe_fd[0] >= nfds)
 		nfds = pipe_fd[0] + 1;
 
+	printf("Pipe address: %d\n",dlist_inspect(dlist_first(cli_list)));
 	printf("parent: pipes are linked\n");
 
 	return nfds;
@@ -514,7 +529,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
  * - Closes and frees pipes
  */
 void free_chld(dlist_position p, dlist *l, fd_set *s) {
-	int *pipe_fd = dlist_inspect(l, p);
+	int *pipe_fd = dlist_inspect(p);
 	FD_CLR(pipe_fd[0], s);
 	close(pipe_fd[0]);
 	close(pipe_fd[1]);
