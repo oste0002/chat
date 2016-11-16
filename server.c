@@ -24,22 +24,22 @@
 #define BACKLOG 10	    // Max number of pending connections
 #define MAXCON 100			// Max number of allowed connections
 
-int setup_serv_con(int *sock_fd, char *port);
+int setup_serv_con(int *sock_fd, int *port);
 int accept_con(int *listen_sock_fd, fd_set *read_fds, dlist *cli_list,
 		int nfds);
 void *get_in_addr(struct sockaddr *sa);
-void sigchld_handler(int s);
 void serv_loop(int *listen_sock_fd_ptr);
 void child_proc(int *sock_fd, int pipe_fd[2]);
 void free_chld(dlist_position p, dlist *l, fd_set *s);
 
+// main
 int main() {
 	int listen_sock_fd = 0;
-	char port[5];
+	int port = 0;
 
 	// Open link
-	sprintf(port,"%d",PORT1);
-	if ((setup_serv_con(&listen_sock_fd, port)) < 0)
+	port = PORT1;
+	if ((setup_serv_con(&listen_sock_fd, &port)) < 0)
 		exit(EXIT_FAILURE);
 
 	// Listen
@@ -56,6 +56,7 @@ int main() {
 	exit(EXIT_SUCCESS);
 }
 
+// serv_loop
 void serv_loop(int *listen_sock_fd_ptr) {
 	int *pipe_fd;
 	dlist *cli_list;
@@ -69,7 +70,6 @@ void serv_loop(int *listen_sock_fd_ptr) {
 	m_capsule m_cap;
 	int num_read_bytes = 0;      // Number of read bytes
 	int num_writ_bytes = 0;      // Number of written bytes
-	dlist_position test_i;
 
 	// Define linked list of clients
 	cli_list = dlist_empty();
@@ -99,23 +99,27 @@ void serv_loop(int *listen_sock_fd_ptr) {
 			if (buf_ch == 27) {
 				printf("ESC is pressed\n");
 				m_cap.signal = CLOSE;
+
+				/* Removing elements from 'cli_list' from beginning to end.
+				 * Every iteration removes the first element.
+				 * From the implementation of dlist, 'dlist_first' returns the
+				 * same address even after the first value of the list is removed.
+				 */
 				for (p = dlist_first(cli_list);
-						dlist_isValid(p) && !dlist_isEnd(p);
-						p = dlist_next(p)) {
-
+						!dlist_isEnd(p);
+						) {
 					pipe_fd = dlist_inspect(p);
-
 					// Send close signal to children
 					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
 									sizeof(m_cap))) == -1 )
 						perror("server write 'CLOSE' to child");
-
 					free_chld(p, cli_list, &set_fds);
 				}
 				dlist_free(cli_list);
 				break;
 			}
 		}
+
 
 		// Error check
 		if (mfds == -1) {
@@ -210,17 +214,20 @@ void serv_loop(int *listen_sock_fd_ptr) {
 	return;
 }
 
-int setup_serv_con(int *sock_fd, char *port) {
+// setup_serv_con
+int setup_serv_con(int *sock_fd, int *port) {
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
 	int yes=1;
+	char port_char[5] = {0};
 
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
 
-	if ((rv = getaddrinfo(NULL, port, &hints, &servinfo)) != 0) {
+	sprintf(port_char, "%d", *port);
+	if ((rv = getaddrinfo(NULL, port_char, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return -1;
 	}
@@ -262,16 +269,17 @@ int setup_serv_con(int *sock_fd, char *port) {
 	return 0;
 }
 
-int accept_con(int *listen_sock_fd, fd_set *set_fds,
-		dlist *cli_list, int nfds) {
+// accept_con
+int accept_con(int *listen_sock_fd,fd_set *set_fds,dlist *cli_list,int nfds) {
 
 	int client_sock_fd[2], listen_sock_fd2 = 0;
 	int *pipe_fd, pipe_fd1[2], pipe_fd2[2];
 	char s[INET6_ADDRSTRLEN];
-	char port2[5] = {0};
+	int port2;
 	struct sockaddr_storage their_addr;
 	int num_writ_bytes = 0;
 	socklen_t sin_size = sizeof their_addr;
+	p_capsule p_cap;
 	s_capsule s_cap;
 	struct sigaction sa;
 
@@ -286,8 +294,8 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds,
 
 
 	// Open new link for read connection on PORT2
-	sprintf(port2,"%d",PORT2);
-	if ((setup_serv_con(&listen_sock_fd2, port2)) < 0)
+	port2 = PORT2;
+	if ((setup_serv_con(&listen_sock_fd2, &port2)) < 0)
 		exit(EXIT_FAILURE);
 
 	// Start to listen for read connection
@@ -297,11 +305,11 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds,
 	}
 
 	// Tell client to establish the read connection on PORT2
-	memset(&s_cap,0,sizeof(s_capsule));
-	s_cap.signal = PING;
-	s_cap.siz = PORT2;
-	if ( (num_writ_bytes = send(client_sock_fd[1], &s_cap,
-					sizeof(s_capsule), 0)) == -1 )
+	memset(&p_cap,0,sizeof(p_cap));
+	p_cap.signal = PING;
+	p_cap.num = PORT2;
+	if ( (num_writ_bytes = send(client_sock_fd[1], &p_cap,
+					sizeof(p_cap), 0)) == -1 )
 		perror("child send to client");
 
 
@@ -339,7 +347,6 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds,
 	printf("Pipes are set\n");
 
 	// Setup zombie reaper
-	//sa.sa_handler = sigchld_handler;
 	sa.sa_handler = SIG_IGN;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_RESTART;
@@ -417,6 +424,7 @@ int accept_con(int *listen_sock_fd, fd_set *set_fds,
 	return nfds;
 }
 
+// child_proc
 void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 50000 };
 	fd_set read_fds, set_fds;
@@ -424,7 +432,6 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 	int mfds = 0;				// Number of modified file descriptors
 	s_capsule s_cap;
 	m_capsule m_cap;
-	int read_size;							// Number of bytes to read
 	int num_read_bytes = 0;     // Number of received bytes
 	int num_writ_bytes = 0;     // Number of written bytes
 
@@ -462,7 +469,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 				perror("child receive s_cap from server");
 			if (num_read_bytes != sizeof(s_cap))
 				fprintf(stderr,"s_cap: Not all data is read correctly!\nRead: %d\n"
-						"Size: %d\n",num_read_bytes,sizeof(s_cap));
+						"Size: %u\n",num_read_bytes,(unsigned int)sizeof(s_cap));
 
 
 			switch (s_cap.signal) {
@@ -482,7 +489,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child receive m_cap from server");
 					if (num_read_bytes != s_cap.siz)
 						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
-								"Read: %d\nSize: %d\n",num_read_bytes,s_cap.siz);
+								"Read: %d\nSize: %u\n",num_read_bytes,(unsigned int)s_cap.siz);
 
 					// Send s_cap to CLIENT
 					if ( (num_writ_bytes = send(client_sock_fd[1], &s_cap,
@@ -490,7 +497,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child send s_cap to client");
 					if (num_writ_bytes != sizeof(s_cap))
 						fprintf(stderr,"s_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %d\n",num_writ_bytes,sizeof(s_cap));
+								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
 
 					// Send m_cap to CLIENT
 					if ( (num_writ_bytes = send(client_sock_fd[1], &m_cap,
@@ -498,13 +505,13 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child send to client");
 					if (num_writ_bytes != s_cap.siz)
 						fprintf(stderr,"m_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %d\n",num_writ_bytes,s_cap.siz);
+								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)s_cap.siz);
 
 					// Error check
 					if (num_read_bytes != num_writ_bytes) {
 						fprintf(stderr,"Child process could not transfer all "
 								"data correctly to client\n"
-								"Read: %d\nWrite: %d\n", num_read_bytes, num_writ_bytes);
+								"Read: %d\nWrite: %u\n", num_read_bytes,(unsigned int)num_writ_bytes);
 						return;
 					}
 					break;
@@ -523,7 +530,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 				perror("child receive s_cap from client");
 			if (num_read_bytes != sizeof(s_cap))
 				fprintf(stderr,"Not all data is received correctly!\nReceive: %d\n"
-						"Size: %d\n",num_read_bytes,sizeof(s_cap));
+						"Size: %u\n",num_read_bytes,(unsigned int)sizeof(s_cap));
 
 			// Check if connection is closed by client
 			if (num_read_bytes == 0)
@@ -538,7 +545,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child send s_cap:CLOSE to server");
 					if (num_writ_bytes != sizeof(s_cap))
 						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
-								"Write: %d\nSize: %d\n",num_writ_bytes,sizeof(s_cap));
+								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
 					return;
 
 					// Respond to ping
@@ -555,7 +562,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child receive m_cap from client");
 					if (num_read_bytes != s_cap.siz)
 						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
-								"Read: %d\nSize: %d\n",num_read_bytes,s_cap.siz);
+								"Read: %d\nSize: %u\n",num_read_bytes,(unsigned int)s_cap.siz);
 
 					// Write s_cap to SERVER
 					if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
@@ -563,7 +570,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child send s_cap:MESSAGE to server");
 					if (num_writ_bytes != sizeof(s_cap))
 						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
-								"Write: %d\nSize: %d\n",num_writ_bytes,sizeof(s_cap));
+								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
 
 					// Write m_cap to SERVER
 					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
@@ -571,13 +578,13 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 						perror("child send m_cap to server");
 					if (num_writ_bytes != s_cap.siz)
 						fprintf(stderr,"m_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %d\n",num_writ_bytes,s_cap.siz);
+								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)s_cap.siz);
 
 					// Error check
 					if (num_read_bytes != num_writ_bytes) {
 						fprintf(stderr,"Child process could not transfer all "
 								"data correctly to server\n"
-								"Read: %d\nWrite: %d\n", num_read_bytes, num_writ_bytes);
+								"Read: %d\nWrite: %u\n", num_read_bytes,(unsigned int)num_writ_bytes);
 						return;
 					}
 
@@ -592,9 +599,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 	}
 }
 
-
-
-
+// free_child
 /* l: (dlist *) - A dlist_ptr containing elements of (int)pipe[2]
  * p: (dlist_position) - Position in l
  * s: (fd_set *) - pipe[0] is removed from this set
@@ -612,18 +617,11 @@ void free_chld(dlist_position p, dlist *l, fd_set *s) {
 	return;
 }
 
-// Get sockaddr, IPv4 or IPv6:
+// get_in_addr
 void *get_in_addr(struct sockaddr *sa) {
 	if (sa->sa_family == AF_INET) {
 		return &(((struct sockaddr_in*)sa)->sin_addr);
 	}
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-// Zombie reaper
-void sigchld_handler(int s) {
-	int saved_errno = errno;
-	while(waitpid(-1, NULL, WNOHANG) > 0);
-	errno = saved_errno;
 }
 

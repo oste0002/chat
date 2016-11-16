@@ -22,6 +22,13 @@ typedef struct S_Capsule {
   ssize_t siz;
 } s_capsule;
 
+// Ping capsule
+typedef struct P_Capsule {
+  char origin[O_LEN];
+  Signal signal;
+  int num;
+} p_capsule;
+
 
 // Use for calculation of the size of 'm_capsule' and 's_capsule'
 typedef struct REF_Capsule {
