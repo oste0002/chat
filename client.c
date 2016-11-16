@@ -16,11 +16,9 @@
 #include "capsule.h"
 #include "psutils.h"
 
-#define ADDRESS "127.0.0.1"     // IP-address
-#define PORT1 "15001"           // Port
-#define PORT2 "15002"           // Port
-#define MAXDATASIZE 100         // Max number of bytes to send
-#define STDIN 0
+#define ADDRESS			"127.0.0.1"     // IP-address
+#define PORT				15001           // Port
+#define STDIN				0
 
 
 int setup_talk_con(char *node, char *port, int *sock_fds);
@@ -31,7 +29,7 @@ void client_free(int *sock_fds);
 int main(int argc, char *argv[]) {
 	int sock_fds[2];
 	int num_recv_bytes = 0;
-	char nick_name[NAME_LEN] = {0};
+	char nick_name[O_LEN] = {0};
 	char port[5] = {0};
 	s_capsule s_cap;
 
@@ -42,18 +40,20 @@ int main(int argc, char *argv[]) {
 	}
 
 	// Setup recv connection
-	if ( (setup_talk_con(ADDRESS, PORT1, &sock_fds[0])) == -1)
+	sprintf(port, "%d", PORT);
+	if ( (setup_talk_con(ADDRESS, port, &sock_fds[0])) == -1)
 		exit(EXIT_FAILURE);
 
-	memset(&s_cap, 0, sizeof s_cap);
-	if ((num_recv_bytes = recv(sock_fds[0], &s_cap, sizeof s_cap, 0)) == -1) {
+	memset(&s_cap, 0, sizeof(s_cap));
+	if ((num_recv_bytes = recv(sock_fds[0], &s_cap, sizeof(s_cap), 0)) == -1) {
 		perror("receive");
 		exit(EXIT_FAILURE);
 	}
 
 	// Setup send connection
+	sprintf(port, "%d", s_cap.siz);
 	if (s_cap.signal == PING) {
-		if ( (setup_talk_con(ADDRESS, s_cap.content, &sock_fds[1])) == -1) {
+		if ( (setup_talk_con(ADDRESS, port, &sock_fds[1])) == -1) {
 			fprintf(stderr,"Could not establish write connection\n");
 			exit(EXIT_FAILURE);
 		}
@@ -63,12 +63,10 @@ int main(int argc, char *argv[]) {
 	}
 
 
-
 	// Read nick name
-	printf("Insert name or 'quit': ");
-	pgets(nick_name, sizeof nick_name);
-	if (!strcmp(nick_name, "quit"))
-		exit(EXIT_SUCCESS);
+	printf("Insert nick: ");
+	while (pgets(nick_name, sizeof(nick_name)) < 3*sizeof(char))
+		printf("Please use a nickname at least 3 letters long.\nInsert nick: ");
 
 	cli_loop(sock_fds, nick_name);
 
@@ -78,15 +76,18 @@ int main(int argc, char *argv[]) {
 }
 
 void cli_loop(const int *sock_fds, char *nick_name) {
-	char buf_ch, mess[MESS_LEN];
+	char buf_ch;
+	char mess[M_LEN];
 	int num_recv_bytes = 0;
 	int num_sent_bytes = 0;
-	m_capsule rcap, scap = {0}; // recv-, send-capsule
+	s_capsule s_cap = {0};				// size capsule
+	s_capsule	p_cap = {0};				// ping capsule
+	m_capsule m_cap = {0};				// main capsule
 	fd_set read_fds, set_fds;
 	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 200000 };
 	int mfds = 0;
 
-	strncpy(scap.origin, nick_name, NAME_LEN);
+	strncpy(m_cap.origin, nick_name, O_LEN);
 
 	FD_ZERO(&set_fds);
 	FD_SET(STDIN, &set_fds);
@@ -110,48 +111,115 @@ void cli_loop(const int *sock_fds, char *nick_name) {
 		if (mfds == 0)
 			continue;
 
+		// Send message
 		if (FD_ISSET(STDIN, &read_fds)) {
 
-			buf_ch = getchar();
-			if (buf_ch == 27)
-				exit(EXIT_SUCCESS);
-
-			printf("%s: ", nick_name);
-			pgets(mess, sizeof mess);
-
-			if (!strcmp(mess, "quit")) {
+			// Exit on ESC
+			pgetc(&buf_ch);
+			if (buf_ch == 27) {
 				close(sock_fds[0]);
 				close(sock_fds[1]);
 				exit(EXIT_SUCCESS);
 			}
 
-			strncpy(scap.content, mess, sizeof mess);
+			// Get message
+			printf("%s: ", nick_name);
+			//	pgets(mess, sizeof(mess));
+			//	strncpy(m_cap.content, mess, sizeof(mess));
 
-			if ((num_sent_bytes = send(sock_fds[1], &scap, sizeof scap, 0)) == -1) {
-				perror("send");
-				exit(EXIT_FAILURE);
-			}
+			// TODO: Try something like
+			// s_cap = { .origin = nick_name, .signal = SIZE_DESCRIPTOR, .content = 0}
 
-			if (num_sent_bytes < (sizeof scap))
-				fprintf(stderr,"Could not send all of the message");
+			memset(&s_cap,0,sizeof(s_cap));
+			memset(&m_cap,0,sizeof(m_cap));
+			strncpy(s_cap.origin, nick_name, sizeof(nick_name));
+			strncpy(m_cap.origin, nick_name, sizeof(nick_name));
+			strncpy(p_cap.origin, nick_name, sizeof(nick_name));
+			s_cap.signal = SIZE_DESCRIPTOR;
+			m_cap.signal = MESSAGE;
+			p_cap.signal = PING;
 
-			memset(scap.content, 0, sizeof scap.content);
+
+			// Store the size of the main message to s_cap.siz and
+			// store the message to m_cap.siz simultaneously
+			s_cap.siz = sizeof(ref_capsule) +
+				(int)pgets(m_cap.content, M_LEN*sizeof(char));
+
+			// Send s_cap
+			if ((num_sent_bytes = send(sock_fds[1], &s_cap,
+							sizeof(s_cap), 0)) == -1)
+				perror("send s_cap");
+			if (num_sent_bytes != sizeof(s_cap))
+				fprintf(stderr,"s_cap: Not all data is sent correctly!\nSent: %d\n"
+						"Size: %d\n",num_sent_bytes,sizeof(s_cap));
+
+
+			//	// Receive p_cap
+			//	if ((num_recv_bytes = recv(sock_fds[0], &p_cap,
+			//					sizeof(p_cap), 0)) == -1)
+			//		perror("receive p_cap");
+			//	if (num_recv_bytes != sizeof(p_cap))
+			//		fprintf(stderr,"p_cap: Not all data is received correctly!\nReceived: %d\n"
+			//				"Size: %d\n",num_sent_bytes,sizeof(p_cap));
+
+
+			// Send m_cap
+			if ((num_sent_bytes = send(sock_fds[1], &m_cap,
+							s_cap.siz, 0)) == -1)
+				perror("send m_cap");
+			if (num_sent_bytes != s_cap.siz)
+				fprintf(stderr,"m_cap: Not all data is sent correctly!\nSent: %d\n"
+						"Size: %d\n",num_sent_bytes,s_cap.siz);
+
+
 		}
 
+		// Receive message
 		if (FD_ISSET(sock_fds[0], &read_fds)) {
 
-			if ((num_recv_bytes = recv(sock_fds[0], &rcap, sizeof rcap, 0)) == -1) {
+			memset(&s_cap,0,sizeof(s_cap));
+			memset(&m_cap,0,sizeof(m_cap));
+
+			// Receive s_cap
+			if ((num_recv_bytes = recv(sock_fds[0], &s_cap,
+							sizeof(s_cap), 0)) == -1)
 				perror("receive");
-				exit(EXIT_FAILURE);
-			}
 			if (num_recv_bytes == 0) {
 				FD_CLR(sock_fds[0], &set_fds);
 				close(sock_fds[0]);
 				close(sock_fds[1]);
 				exit(EXIT_SUCCESS);
 			}
+			if (num_recv_bytes != sizeof(s_cap))
+				fprintf(stderr,"s_cap: Not all data is received correctly!\nReceived: %d\n"
+						"Size: %d\n",num_sent_bytes,sizeof(p_cap));
 
-			printf("%s: %s\n", rcap.origin, rcap.content);
+
+			//	// Send p_cap
+			//	if ((num_sent_bytes = send(sock_fds[1], &p_cap,
+			//					sizeof(p_cap), 0)) == -1)
+			//		perror("send p_cap");
+			//	if (num_sent_bytes != sizeof(p_cap))
+			//		fprintf(stderr,"p_cap: Not all data is sent correctly!\nSent: %d\n"
+			//				"Size: %d\n",num_sent_bytes,s_cap.siz);
+
+
+			// Receive m_cap
+			if ((num_recv_bytes = recv(sock_fds[0], &m_cap,
+							s_cap.siz, 0)) == -1)
+				perror("receive");
+			if (num_recv_bytes == 0) {
+				FD_CLR(sock_fds[0], &set_fds);
+				close(sock_fds[0]);
+				close(sock_fds[1]);
+				exit(EXIT_SUCCESS);
+			}
+			if (num_recv_bytes != s_cap.siz)
+				fprintf(stderr,"m_cap: Not all data is received correctly!\nReceived: %d\n"
+						"Size: %d\n",num_sent_bytes,s_cap.siz);
+
+			// Print received message
+			printf("%s: %s\n", m_cap.origin, m_cap.content);
 		}
 
 	}
@@ -162,7 +230,7 @@ int setup_talk_con(char *node, char *port, int *sock_fds) {
 	int rv;
 	char s[INET6_ADDRSTRLEN];
 
-	memset(&hints, 0, sizeof hints);
+	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 
@@ -192,10 +260,10 @@ int setup_talk_con(char *node, char *port, int *sock_fds) {
 	}
 
 	inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
-			s, sizeof s);
-	printf("client: connecting to %s\n", s);
+			s, sizeof(s));
+	//printf("client: connecting to %s\n", s);
 
-	freeaddrinfo(servinfo); // all done with this structure
+	freeaddrinfo(servinfo);
 
 	return 0;
 }
