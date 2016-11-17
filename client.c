@@ -129,22 +129,21 @@ void cli_loop(const int *sock_fds, char *nick_name) {
 			//	strncpy(m_cap.content, mess, sizeof(mess));
 
 			// TODO: Try something like
-			// s_cap = { .origin = nick_name, .signal = SIZE_DESCRIPTOR, .content = 0}
+			// s_cap = { .origin = nick_name, .signal = SIZE, .content = 0}
 
 			memset(&s_cap,0,sizeof(s_cap));
 			memset(&m_cap,0,sizeof(m_cap));
 			strncpy(s_cap.origin, nick_name, O_LEN * sizeof(char));
 			strncpy(m_cap.origin, nick_name, O_LEN * sizeof(char));
 			strncpy(p_cap.origin, nick_name, O_LEN * sizeof(char));
-			s_cap.signal = SIZE_DESCRIPTOR;
-			m_cap.signal = MESSAGE;
+			s_cap.signal = SIZE;
+			m_cap.signal = MESS;
 			p_cap.signal = PING;
 
 
 			// Store the size of the main message to s_cap.siz and
 			// store the message to m_cap.siz simultaneously
-			s_cap.siz = sizeof(ref_capsule) +
-				(int)pgets(m_cap.content, M_LEN*sizeof(char));
+			s_cap.siz = M_CAP_SIZ +	(int)pgets(m_cap.content, M_LEN*sizeof(char));
 
 			// Send s_cap
 			if ((num_sent_bytes = send(sock_fds[1], &s_cap,

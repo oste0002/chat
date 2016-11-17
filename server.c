@@ -98,7 +98,7 @@ void serv_loop(int *listen_sock_fd_ptr) {
 
 			if (buf_ch == 27) {
 				printf("ESC is pressed\n");
-				m_cap.signal = CLOSE;
+				m_cap.signal = CLOS;
 
 				/* Removing elements from 'cli_list' from beginning to end.
 				 * Every iteration removes the first element.
@@ -112,7 +112,7 @@ void serv_loop(int *listen_sock_fd_ptr) {
 					// Send close signal to children
 					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
 									sizeof(m_cap))) == -1 )
-						perror("server write 'CLOSE' to child");
+						perror("server write 'CLOS' to child");
 					free_chld(p, cli_list, &set_fds);
 				}
 				dlist_free(cli_list);
@@ -171,11 +171,11 @@ void serv_loop(int *listen_sock_fd_ptr) {
 				switch (s_cap.signal) {
 
 					// Free child if child is closing
-					case CLOSE :
+					case CLOS :
 						free_chld(q, cli_list, &set_fds);
 						break;
 
-					case SIZE_DESCRIPTOR :
+					case SIZE:
 
 						// Read m_cap
 						memset(&m_cap,0,sizeof(m_cap));
@@ -388,7 +388,7 @@ int accept_con(int *listen_sock_fd,fd_set *set_fds,dlist *cli_list,int nfds) {
 
 		// Clean up after returned child process
 		memset(&s_cap,0,sizeof(s_capsule));
-		s_cap.signal = CLOSE;
+		s_cap.signal = CLOS;
 		if ( (num_writ_bytes = write(pipe_fd[1], &s_cap, sizeof(s_cap))) == -1 )
 			perror("child write to server");
 		close(client_sock_fd[0]);
@@ -432,8 +432,8 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 	int mfds = 0;				// Number of modified file descriptors
 	s_capsule s_cap;
 	m_capsule m_cap;
-	int num_read_bytes = 0;     // Number of received bytes
-	int num_writ_bytes = 0;     // Number of written bytes
+	int32_t num_read_bytes = 0;     // Number of received bytes
+	int32_t num_writ_bytes = 0;     // Number of written bytes
 
 	FD_ZERO(&set_fds);						// Create set of file descriptors
 	FD_SET(client_sock_fd[0], &set_fds);    // Listen from connected client
@@ -475,11 +475,11 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 			switch (s_cap.signal) {
 
 				// Exit client if parent process is closing
-				case CLOSE :
+				case CLOS :
 					return;
 
 					// Redirect incoming message from SERVER
-				case SIZE_DESCRIPTOR :
+				case SIZE:
 
 					memset(&m_cap,0,sizeof(m_cap));
 
@@ -539,10 +539,10 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 			switch (s_cap.signal) {
 
 				// Exit client if parent is closing
-				case CLOSE :
+				case CLOS :
 					if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
 									sizeof(s_cap))) == -1 )
-						perror("child send s_cap:CLOSE to server");
+						perror("child send s_cap:CLOS to server");
 					if (num_writ_bytes != sizeof(s_cap))
 						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
 								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
@@ -553,7 +553,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 					//TODO
 					break;
 
-				case SIZE_DESCRIPTOR :
+				case SIZE:
 
 					// Read from CLIENT
 					memset(&m_cap,0,sizeof(m_cap));
@@ -567,7 +567,7 @@ void child_proc(int *client_sock_fd, int pipe_fd[2]) {
 					// Write s_cap to SERVER
 					if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
 									sizeof(s_cap))) == -1 )
-						perror("child send s_cap:MESSAGE to server");
+						perror("child send s_cap:MESS to server");
 					if (num_writ_bytes != sizeof(s_cap))
 						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
 								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
