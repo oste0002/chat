@@ -1,5 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -144,6 +142,7 @@ void cli_loop(const int *sock_fds, char *nick_name) {
 			// Store the size of the main message to s_cap.siz and
 			// store the message to m_cap.siz simultaneously
 			s_cap.siz = M_CAP_SIZ +	(int)pgets(m_cap.content, M_LEN*sizeof(char));
+
 
 			// Send s_cap
 			if ((num_sent_bytes = send(sock_fds[1], &s_cap,
