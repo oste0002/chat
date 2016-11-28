@@ -28,4 +28,22 @@ void pgetc(char *c);
  */
 int pgetd(int *d);
 
+
+/* VACLOSE -	variadic close
+ *  argc	 -	Number of arguments passed to vaclose() excluding 'argc' itself
+ *  ...		 -	Variadic number of addresses to be closed by close()
+ *
+ *	Return:	None
+ */
+void vaclose(const unsigned int argc, ...);
+
+
+/* VAFREE -	variadic close
+ *  argc	 -	Number of arguments passed to vaclose() excluding 'argc' itself
+ *  ...		 -	Variadic number of addresses to be closed by close()
+ *
+ *	Return:	None
+ */
+void vafree(const unsigned int argc, ...);
+
 #endif

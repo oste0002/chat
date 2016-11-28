@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdbool.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include "psutils.h"
 
@@ -103,4 +106,32 @@ int pgetd(int *d) {
 	sscanf(str, "%d", d);
 
 	return(0);
+}
+
+
+void vaclose(const unsigned int argc, ...) {
+	va_list va;
+	unsigned int i;
+
+	va_start(va,argc);
+	for (i=0;i<argc;i++) {
+		close(va_arg(va,int));
+	}
+	va_end(va);
+
+	return;
+}
+
+
+void vafree(const unsigned int argc, ...) {
+	va_list va;
+	unsigned int i;
+
+	va_start(va,argc);
+	for (i=0;i<argc;i++) {
+		free(va_arg(va,void *));
+	}
+	va_end(va);
+
+	return;
 }

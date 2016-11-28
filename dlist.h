@@ -15,20 +15,20 @@ då de tas bort från listan. OBS i detta fall så måste användaren kopiera
 värdena om de ska finnas kvar efter att ha tagits bort från listan.
 */
 
-#ifndef _DLIST_H
-#define _DLIST_H
+#ifndef DLIST_H
+#define DLIST_H
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 
-#ifndef __DATA
-#define __DATA
+#ifndef DATA
+#define DATA
 typedef void *data;
 #endif
 
-#ifndef __MEMFREEDATAFUNC
-#define __MEMFREEDATAFUNC
+#ifndef MEM_FREE_DATA_FUNC
+#define MEM_FREE_DATA_FUNC
 typedef void memFreeFunc(data);
 #endif
 

@@ -27,15 +27,9 @@ void client_free(int *sock_fds);
 int main() {
 	int sock_fds[2];
 	int num_recv_bytes = 0;
-	char nick_name[O_LEN] = {0};
+	char nick_name[NICK_LEN] = {0};
 	char port[5] = {0};
 	p_capsule p_cap;
-
-	// // Syntax
-	// if (argc != 1) {
-	// 	fprintf(stderr,"usage: client\n");
-	// 	exit(EXIT_FAILURE);
-	// }
 
 	// Setup recv connection
 	sprintf(port, "%d", PORT);
@@ -86,7 +80,7 @@ void cli_loop(const int *sock_fds, char *nick_name) {
 	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 200000 };
 	int mfds = 0;
 
-	strncpy(m_cap.origin, nick_name, O_LEN);
+	strncpy(m_cap.origin, nick_name, NICK_LEN);
 
 	FD_ZERO(&set_fds);
 	FD_SET(STDIN, &set_fds);
@@ -131,9 +125,9 @@ void cli_loop(const int *sock_fds, char *nick_name) {
 
 			memset(&s_cap,0,sizeof(s_cap));
 			memset(&m_cap,0,sizeof(m_cap));
-			strncpy(s_cap.origin, nick_name, O_LEN * sizeof(char));
-			strncpy(m_cap.origin, nick_name, O_LEN * sizeof(char));
-			strncpy(p_cap.origin, nick_name, O_LEN * sizeof(char));
+			strncpy(s_cap.origin, nick_name, NICK_LEN * sizeof(char));
+			strncpy(m_cap.origin, nick_name, NICK_LEN * sizeof(char));
+			strncpy(p_cap.origin, nick_name, NICK_LEN * sizeof(char));
 			s_cap.signal = SIZE;
 			m_cap.signal = MESS;
 			p_cap.signal = PING;

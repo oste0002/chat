@@ -4,36 +4,42 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/types.h>
+#include <limits.h>
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/wait.h>
-#include <signal.h>
+
 #include <sys/time.h>
 #include <sys/select.h>
+#include <sys/wait.h>
+#include <signal.h>
 
+#include <sys/shm.h>
+#include <sys/ipc.h>
+
+#include <stdbool.h>
+#include <time.h>
+
+#include "server.h"
 #include "capsule.h"
 #include "dlist.h"
+#include "hashtable.h"
 #include "psutils.h"
 
-#define PORT1 15001			// Port1
-#define PORT2 15002			// Port2
-#define BACKLOG 10	    // Max number of pending connections
-#define MAXCON 100			// Max number of allowed connections
 
-int setup_serv_con(int *sock_fd, int *port);
-int accept_con(int *listen_sock_fd, fd_set *read_fds, dlist *cli_list,
-		int nfds);
-void *get_in_addr(struct sockaddr *sa);
-void serv_loop(int *listen_sock_fd_ptr);
-void child_proc(int *sock_fd, int pipe_fd[2]);
-void free_chld(dlist_position p, dlist *l, fd_set *s);
 
 // main
-int main() {
+int main(int argc, char* argv[]) {
 	int listen_sock_fd = 0;
 	int port = 0;
+
+	if (argc != 1) {
+		fprintf(stderr, "Syntax: server\n");
+		exit(EXIT_FAILURE);
+	}
+
 
 	// Open link
 	port = PORT1;
@@ -57,9 +63,10 @@ int main() {
 // serv_loop
 void serv_loop(int *listen_sock_fd_ptr) {
 	int *pipe_fd;
-	dlist *cli_list;
+	dlist *chld_list;
+	hashtable_t *chld_hash;
 	char buf_ch;
-	struct timeval read_tv, set_tv = { .tv_sec = 1, .tv_usec = 0 };
+	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 500000 };
 	fd_set read_fds, set_fds;
 	int nact = 0, nfds = 0, nfds_tmp;
 	int mfds = 0;
@@ -68,10 +75,14 @@ void serv_loop(int *listen_sock_fd_ptr) {
 	m_capsule m_cap;
 	int num_read_bytes = 0;      // Number of read bytes
 	int num_writ_bytes = 0;      // Number of written bytes
+	child_data_prnt *child;
 
-	// Define linked list of clients
-	cli_list = dlist_empty();
-	dlist_setMemHandler(cli_list, free);
+
+	// Define linked list of child data
+	chld_list = dlist_empty();
+
+	// Define hashtable for child data ID:s
+	chld_hash = hashtable_empty(2*MAXCON, strhash, strcmp2);
 
 	// Define file descriptor set and add listening socket
 	FD_ZERO(&set_fds);
@@ -98,22 +109,23 @@ void serv_loop(int *listen_sock_fd_ptr) {
 				printf("ESC is pressed\n");
 				m_cap.signal = CLOS;
 
-				/* Removing elements from 'cli_list' from beginning to end.
+				/* Removing elements from 'chld_list' from beginning to end.
 				 * Every iteration removes the first element.
 				 * From the implementation of dlist, 'dlist_first' returns the
 				 * same address even after the first value of the list is removed.
 				 */
-				for (p = dlist_first(cli_list);
+				for (p = dlist_first(chld_list);
 						!dlist_isEnd(p);
 						) {
-					pipe_fd = dlist_inspect(p);
+					child = dlist_inspect(p);
 					// Send close signal to children
-					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
+					if ( (num_writ_bytes = write(child->pipe_fd[1], &m_cap,
 									sizeof(m_cap))) == -1 )
 						perror("server write 'CLOS' to child");
-					free_chld(p, cli_list, &set_fds);
+					parent_call_free_chld(child, chld_list, chld_hash, &set_fds);
 				}
-				dlist_free(cli_list);
+				hashtable_free(chld_hash);
+				dlist_free(chld_list);
 				break;
 			}
 		}
@@ -124,7 +136,8 @@ void serv_loop(int *listen_sock_fd_ptr) {
 			if (strcmp(strerror(errno),"EINTR"))
 				continue;
 			perror("server select");
-			dlist_free(cli_list);
+			hashtable_free(chld_hash);
+			dlist_free(chld_list);
 			exit(EXIT_FAILURE);
 		}
 
@@ -137,8 +150,8 @@ void serv_loop(int *listen_sock_fd_ptr) {
 		// Test if listen_sock_fd is set i.e. a new client attempts to connect,
 		// then accept the connection.
 		if (FD_ISSET(*listen_sock_fd_ptr, &read_fds)) {
-			if ( (nfds_tmp = accept_con(listen_sock_fd_ptr,
-							&set_fds, cli_list, nfds)) > nfds )
+			if ( (nfds_tmp = accept_con(listen_sock_fd_ptr,	&set_fds,
+							chld_list, chld_hash,	nfds)) > nfds )
 				nfds = nfds_tmp;
 
 			printf("nsdf: %d\n",nfds);
@@ -149,20 +162,20 @@ void serv_loop(int *listen_sock_fd_ptr) {
 
 		// Distribute messages
 
-		for ( p = dlist_first(cli_list);
+		for ( p = dlist_first(chld_list);
 				( dlist_isValid(p) && !dlist_isEnd(p) && (nact < mfds) );
 				p=dlist_next(p)) {
 
-			pipe_fd = dlist_inspect(p);
+			child = dlist_inspect(p);
 
 			// Test if child is set
-			if (FD_ISSET(pipe_fd[0], &read_fds)) {
+			if (FD_ISSET(child->pipe_fd[0], &read_fds)) {
 				nact++;
 
 				q = p;
 
 				// Read message
-				if ( (num_read_bytes = read(pipe_fd[0], &s_cap,
+				if ( (num_read_bytes = read(child->pipe_fd[0], &s_cap,
 								sizeof(s_cap))) == -1 )
 					perror("server receive s_cap from child");
 
@@ -170,34 +183,43 @@ void serv_loop(int *listen_sock_fd_ptr) {
 
 					// Free child if child is closing
 					case CLOS :
-						free_chld(q, cli_list, &set_fds);
+						parent_call_free_chld(child, chld_list, chld_hash, &set_fds);
 						break;
 
 					case SIZE:
 
+						// Continue if child is inactive
+						if (child->is_active == false) {
+							continue;
+						}
+
 						// Read m_cap
 						memset(&m_cap,0,sizeof(m_cap));
-						if ( (num_read_bytes = read(pipe_fd[0], &m_cap,
+						if ( (num_read_bytes = read(child->pipe_fd[0], &m_cap,
 										s_cap.siz)) == -1 )
 							perror("child receive m_cap from server");
 
 
-						q = dlist_moveToFront(cli_list, q);
+						q = dlist_moveToFront(chld_list, q);
 
 						// Transfer message
 						for (q = dlist_next(q);
 								dlist_isValid(q) && !dlist_isEnd(q);
 								q = dlist_next(q)) {
 
-							pipe_fd = dlist_inspect(q);
+							child = dlist_inspect(q);
+
+							// Continue if child is inactive
+							if (child->is_active == false)
+								continue;
 
 							// Write s_cap to child
-							if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
+							if ( (num_writ_bytes = write(child->pipe_fd[1], &s_cap,
 											sizeof(s_cap))) == -1 )
 								perror("server send to child");
 
 							// Write m_cap to child
-							if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
+							if ( (num_writ_bytes = write(child->pipe_fd[1], &m_cap,
 											s_cap.siz)) == -1 )
 								perror("server send to child");
 						}
@@ -210,6 +232,438 @@ void serv_loop(int *listen_sock_fd_ptr) {
 		}
 	}
 	return;
+}
+
+// accept_con
+int accept_con(int *listen_sock_fd, fd_set *set_fds, dlist *chld_list,
+		hashtable_t *chld_hash, int nfds) {
+
+	int client_sock_fd[2], listen_sock_fd2 = 0;
+	int *pipe_fd, pipe_fd1[2], pipe_fd2[2];
+	char s[INET6_ADDRSTRLEN];
+	int port2;
+	struct sockaddr_storage their_addr;
+	int num_writ_bytes = 0;
+	socklen_t sin_size = sizeof(their_addr);
+	p_capsule p_cap = {0};
+	child_data *child;
+	struct sigaction sa;
+	fd_set read_fds;
+	struct timeval read_tv = { .tv_sec = 0, .tv_usec = 0 },
+								 set_tv = { .tv_sec = 1, .tv_usec = 10000 };
+	int pid;
+	int i;
+	key_t shm_key;
+	int shm_id;
+	int id;
+
+	extern char self_path[14];
+	const size_t buf_size = PATH_MAX + 1;
+	char buf_name[buf_size];
+	memset(&buf_name,0,sizeof(buf_name));
+	readlink(self_path, buf_name, PATH_MAX);
+
+
+	char elf_name[strlen(buf_name)];
+	strncpy(elf_name, buf_name, sizeof(elf_name));
+
+	// Generate child ID
+	srand(time(NULL));
+	id = rand();
+	while( hashtable_lookup(chld_hash, &id) != NULL ) {
+		srand(time(NULL));
+		id = rand();
+	}
+
+	printf("child-ID: %u\n",id);
+
+	elf_name[sizeof(elf_name)] = 0;
+
+	// Allocate child within shared memory
+	if ( (shm_key = ftok(elf_name, id)) == -1 ) {
+		perror("ftok");
+		exit(EXIT_FAILURE);
+	}
+	if ( (shm_id = shmget(shm_key, sizeof(child), IPC_CREAT | 0660 )) == -1 ) {
+		perror("shmget");
+		exit(EXIT_FAILURE);
+	}
+	if ( (child = shmat(shm_id, NULL, 0)) == (void *)(-1) ) {
+		perror("parent: shmat");
+		exit(EXIT_FAILURE);
+	}
+
+	memset(child, 0, sizeof(child));
+
+	// Insert child into hashtable
+	hashtable_insert(chld_hash, &id, child);
+
+	// Insert child into dlist
+	child->list_pos = dlist_insert(dlist_first(chld_list), child);
+
+	child->shm_id = shm_id;
+	child->id = id;
+
+	// Create pipes in two directions
+	if (pipe(pipe_fd1) == -1) {
+		perror("pipe");
+		exit(EXIT_FAILURE);
+	}
+	if (pipe(pipe_fd2) == -1) {
+		perror("pipe");
+		exit(EXIT_FAILURE);
+	}
+	child->pipe_fd_chld[0] = pipe_fd1[0];
+	child->pipe_fd_chld[1] = pipe_fd2[1];
+	child->pipe_fd_prnt[0] = pipe_fd2[0];
+	child->pipe_fd_prnt[1] = pipe_fd1[1];
+
+	printf("Pipes are set\n");
+
+	// Setup zombie reaper
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+		perror("sigaction");
+	}
+	printf("Zombie reaper is set\n");
+
+
+	// Create child process
+	if ( !(pid=fork()) ) {
+
+		// Attach child to shared memory
+		if ( (child = shmat(shm_id, NULL, 0)) == (void *)(-1) ) {
+			perror("child: shmat");
+			exit(EXIT_FAILURE);
+		}
+
+		// Set up write connection
+		child->client_sock_fd[1] = accept(*listen_sock_fd,
+				(struct sockaddr *)&their_addr, &sin_size);
+
+		if (child->client_sock_fd[1] == -1) {
+			// TODO free_child
+			exit(EXIT_FAILURE);
+		}
+
+		// Open new link for receive connection on PORT2
+		port2 = PORT2;
+		if ((setup_serv_con(&listen_sock_fd2, &port2)) < 0) {
+			// Tell parent that connection failed so that associated data can be freed
+			// TODO free_child
+			exit(EXIT_FAILURE);
+		}
+
+		// Start to listen for receive connection
+		if (listen(listen_sock_fd2, BACKLOG) == -1) {
+			perror("listen receive socket");
+			// TODO free_child
+			exit(EXIT_FAILURE);
+		}
+
+		// Tell client to establish the receive connection on PORT2
+		memset(&p_cap,0,sizeof(p_cap));
+		p_cap.signal = PING;
+		p_cap.num = PORT2;
+		if ( (num_writ_bytes = send(child->client_sock_fd[1], &p_cap,
+						sizeof(p_cap), 0)) == -1 ) {
+			// TODO free_child
+			exit(EXIT_FAILURE);
+		}
+
+		// While client is thinking and packets are in the air,
+		// we allocate and link the pipes of interprocess communication
+
+		/*	Child:
+		 *
+		 *	client_sock_fd[0]     read
+		 *	client_sock_fd[1]     write
+		 *	pipe_fd[0]			  read
+		 *	pipe_fd[1]			  write
+		 */
+
+
+		close(pipe_fd1[1]);
+		close(pipe_fd2[0]);
+		printf("child: pipes are linked\n");
+
+
+		// Set up read connection
+		child->client_sock_fd[0] = accept(listen_sock_fd2,
+				(struct sockaddr *)&their_addr, &sin_size);
+		if (child->client_sock_fd[0] == -1) {
+			perror("accept send socket");
+			// TODO free_child
+			exit(EXIT_FAILURE);
+		}
+
+		printf("child: receive connection is set\n");
+
+		// Close sockets
+		close(*listen_sock_fd);
+		close(listen_sock_fd2);
+
+		// Print successful connection to stdout
+		inet_ntop(their_addr.ss_family,
+				get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
+		printf("server: got connection from %s\n", s);
+
+
+		child->is_active = true;
+
+		//  Network connection is now established
+
+		// Child function starts here
+		child_proc((child_data_chld *)child);
+
+		printf("connection from %s has been closed\n", s);
+
+		_Exit(EXIT_SUCCESS);
+	}
+
+	printf("child pid: %d\n",pid);
+
+	/*	Parent:
+	 *
+	 *	pipe_fd[0]			  read
+	 *	pipe_fd[1]			  write
+	 */
+	close(child->pipe_fd_chld[0]);
+	close(child->pipe_fd_chld[1]);
+
+	FD_SET(child->pipe_fd_prnt[0], set_fds);
+
+	if (child->pipe_fd_prnt[0] >= nfds)
+		nfds = child->pipe_fd_prnt[0] + 1;
+
+	return nfds;
+}
+
+// child_proc
+void child_proc(child_data_chld *child) {
+	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 50000 };
+	fd_set read_fds, set_fds;
+	int nfds = 0;				// Largest file descriptor + 1
+	int mfds = 0;				// Number of modified file descriptors
+	s_capsule s_cap;
+	m_capsule m_cap;
+	int32_t num_read_bytes = 0;							// Number of received bytes
+	int32_t num_writ_bytes = 0;							// Number of written bytes
+
+	FD_ZERO(&set_fds);											// Create set of file descriptors
+	FD_SET(child->client_sock_fd[0], &set_fds);		// Listen from connected client
+	FD_SET(child->pipe_fd[0], &set_fds);						// Listen from server
+
+	if (child->client_sock_fd[0] > child->pipe_fd[0])
+		nfds = child->client_sock_fd[0] + 1;
+	else
+		nfds = child->pipe_fd[0] + 1;
+
+	while(1) {
+		read_fds = set_fds;
+		read_tv = set_tv;
+
+		mfds = select(nfds, &read_fds, NULL, NULL, &read_tv);
+
+		// Error check
+		if (mfds == -1) {
+			if (strcmp(strerror(errno),"EINTR")) {
+				fprintf(stderr,"child select: EINTR\n");
+				continue;
+			}
+			perror("child select");
+			return;
+		}
+
+		// Transfer data from SERVER to CLIENT
+		if (FD_ISSET(child->pipe_fd[0], &read_fds)) {
+
+			// Read s_cap
+			if ( (num_read_bytes = read(child->pipe_fd[0], &s_cap,
+							sizeof(s_cap))) == -1 )
+				perror("child receive s_cap from server");
+			if (num_read_bytes != sizeof(s_cap)) {
+				fprintf(stderr,"s_cap: Not all data is read correctly!\n"
+						"Read: %d\nSize: %u\n",
+						num_read_bytes,(unsigned int)sizeof(s_cap));
+				return;
+			}
+
+
+			switch (s_cap.signal) {
+
+				// Exit client if parent process is closing
+				case CLOS :
+					child->is_active = false;
+
+					printf("c1\n");
+					send(child->client_sock_fd[1], &s_cap,sizeof(s_cap), 0);
+					printf("c2\n");
+
+					printf("Freeing child\n");
+					free_child(child);
+					return;
+
+					// Redirect incoming message from SERVER
+				case SIZE:
+
+					memset(&m_cap,0,sizeof(m_cap));
+
+					// Read m_cap from SERVER
+					if ( (num_read_bytes = read(child->pipe_fd[0], &m_cap,
+									s_cap.siz)) == -1 )
+						perror("child receive m_cap from server");
+					if (num_read_bytes != s_cap.siz)
+						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
+								"Read: %d\nSize: %u\n",
+								num_read_bytes,(unsigned int)s_cap.siz);
+
+					// Send s_cap to CLIENT
+					if ( (num_writ_bytes = send(child->client_sock_fd[1], &s_cap,
+									sizeof(s_cap), 0)) == -1 )
+						perror("child send s_cap to client");
+					if (num_writ_bytes != sizeof(s_cap))
+						fprintf(stderr,"s_cap: Not all data is sent correctly!\n"
+								"Send: %d\nSize: %u\n",
+								num_writ_bytes,(unsigned int)sizeof(s_cap));
+
+					// Send m_cap to CLIENT
+					if ( (num_writ_bytes = send(child->client_sock_fd[1], &m_cap,
+									s_cap.siz, 0)) == -1 )
+						perror("child send to client");
+					if (num_writ_bytes != s_cap.siz)
+						fprintf(stderr,"m_cap: Not all data is sent correctly!\n"
+								"Send: %d\nSize: %u\n",
+								num_writ_bytes,(unsigned int)s_cap.siz);
+
+					// Error check
+					if (num_read_bytes != num_writ_bytes) {
+						fprintf(stderr,"Child process could not transfer all "
+								"data correctly to client\n"
+								"Read: %d\nWrite: %u\n",
+								num_read_bytes,(unsigned int)num_writ_bytes);
+						return;
+					}
+					break;
+
+				default :
+					break;
+			}
+		}
+
+		// Transfer data from CLIENT to SERVER
+		if (FD_ISSET(child->client_sock_fd[0], &read_fds)) {
+
+			// Receive s_cap from CLIENT
+			if ( (num_read_bytes = recv(child->client_sock_fd[0], &s_cap,
+							sizeof(s_cap), 0)) == -1)
+				perror("child receive s_cap from client");
+			if (num_read_bytes != sizeof(s_cap) && num_read_bytes != 0)
+				fprintf(stderr,"Not all data is received correctly!\n"
+						"Receive: %d\nSize: %u\n",
+						num_read_bytes,(unsigned int)sizeof(s_cap));
+
+			// Exit if connection is closed by client
+			if (num_read_bytes == 0) {
+				child->is_active = false;
+
+				// Tell parent to close up this child
+				memset(&s_cap,0,sizeof(s_cap));
+				s_cap.signal=CLOS;
+				if ( (num_writ_bytes = write(child->pipe_fd[1], &s_cap,
+								sizeof(s_cap))) == -1 )
+					perror("child send s_cap:CLOS to server");
+
+					printf("c1\n");
+				// Read ack from server
+				do {
+					if ( (num_read_bytes = read(child->pipe_fd[0], &s_cap,
+									sizeof(s_cap))) == -1 )
+						perror("child receive s_cap from server");
+				} while (num_read_bytes != 0); // Now server has closed pipe
+
+					printf("c2\n");
+				printf("Freeing child\n");
+				free_child(child);
+				return;
+			}
+
+			switch (s_cap.signal) {
+
+				// Exit if received close from client
+				case CLOS :
+					child->is_active = false;
+
+					if ( (num_writ_bytes = write(child->pipe_fd[1], &s_cap,
+									sizeof(s_cap))) == -1 )
+						perror("child send s_cap:CLOS to server");
+
+					// Read ack from server
+					do {
+						if ( (num_read_bytes = read(child->pipe_fd[0], &s_cap,
+										sizeof(s_cap))) == -1 )
+							perror("child receive s_cap from server");
+					} while (num_read_bytes != 0); // Now server has closed pipe
+
+					printf("Freeing child\n");
+					free_child(child);
+					return;
+
+					// Respond to ping
+				case PING :
+					//TODO
+					break;
+
+				case SIZE:
+
+					// Read from CLIENT
+					memset(&m_cap,0,sizeof(m_cap));
+					if ( (num_read_bytes = recv(child->client_sock_fd[0], &m_cap,
+									s_cap.siz, 0)) == -1 )
+						perror("child receive m_cap from client");
+					if (num_read_bytes != s_cap.siz)
+						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
+								"Read: %d\nSize: %u\n",
+								num_read_bytes,(unsigned int)s_cap.siz);
+
+					// Write s_cap to SERVER
+					if ( (num_writ_bytes = write(child->pipe_fd[1], &s_cap,
+									sizeof(s_cap))) == -1 )
+						perror("child send s_cap:MESS to server");
+					if (num_writ_bytes != sizeof(s_cap))
+						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
+								"Write: %d\nSize: %u\n",
+								num_writ_bytes,(unsigned int)sizeof(s_cap));
+
+					// Write m_cap to SERVER
+					if ( (num_writ_bytes = write(child->pipe_fd[1], &m_cap,
+									s_cap.siz)) == -1 )
+						perror("child send m_cap to server");
+					if (num_writ_bytes != s_cap.siz)
+						fprintf(stderr,"m_cap: Not all data is written correctly!\n"
+								"Send: %d\nSize: %u\n",
+								num_writ_bytes,(unsigned int)s_cap.siz);
+
+					// Error check
+					if (num_read_bytes != num_writ_bytes) {
+						fprintf(stderr,"Child process could not transfer all "
+								"data correctly to server\n"
+								"Read: %d\nWrite: %u\n",
+								num_read_bytes,(unsigned int)num_writ_bytes);
+						return;
+					}
+
+					// Print message
+					printf("%s: %s\n", m_cap.origin, m_cap.content);
+					break;
+
+				default :
+					break;
+			}
+		}
+	}
 }
 
 // setup_serv_con
@@ -230,8 +684,9 @@ int setup_serv_con(int *sock_fd, int *port) {
 		return -1;
 	}
 
-	// Create socket
 	for(p = servinfo; p != NULL; p = p->ai_next) {
+
+		// Create socket
 		if ((*sock_fd = socket(p->ai_family, p->ai_socktype,
 						p->ai_protocol)) == -1) {
 			perror("server: create socket");
@@ -253,7 +708,7 @@ int setup_serv_con(int *sock_fd, int *port) {
 			continue;
 		}
 
-		break;	// Everything went well, exiting loop
+		break;
 	}
 
 	// Exit on bind fail
@@ -267,352 +722,59 @@ int setup_serv_con(int *sock_fd, int *port) {
 	return 0;
 }
 
-// accept_con
-int accept_con(int *listen_sock_fd,fd_set *set_fds,dlist *cli_list,int nfds) {
+// parent_call_free_child
+void parent_call_free_chld(child_data_prnt *child, dlist *l, hashtable_t *h, fd_set *s) {
+	int pip0 = child->pipe_fd[0];
+	int pip1 = child->pipe_fd[1];
+	s_capsule c_cap = {0};
 
-	int client_sock_fd[2], listen_sock_fd2 = 0;
-	int *pipe_fd, pipe_fd1[2], pipe_fd2[2];
-	char s[INET6_ADDRSTRLEN];
-	int port2;
-	struct sockaddr_storage their_addr;
-	int num_writ_bytes = 0;
-	socklen_t sin_size = sizeof their_addr;
-	p_capsule p_cap;
-	s_capsule s_cap;
-	struct sigaction sa;
+	printf("p1\n");
 
-	// Set up write connection
-	client_sock_fd[1] = accept(*listen_sock_fd,
-			(struct sockaddr *)&their_addr, &sin_size);
-	if (client_sock_fd[1] == -1) {
-		perror("accept send sock");
-		exit(EXIT_FAILURE);
-	}
-	printf("parent: write connection is set\n");
+	FD_CLR(pip0, s);
+	hashtable_remove(h, (ht_key_t) &child->id);
+	dlist_remove(l, child->list_pos);
 
+	printf("p2\n");
 
-	// Open new link for read connection on PORT2
-	port2 = PORT2;
-	if ((setup_serv_con(&listen_sock_fd2, &port2)) < 0)
-		exit(EXIT_FAILURE);
-
-	// Start to listen for read connection
-	if (listen(listen_sock_fd2, BACKLOG) == -1) {
-		perror("listen receive socket");
-		exit(EXIT_FAILURE);
+	// Tell child to close if it is still active. It is supposed to do
+	// this if child is inactive because then child is already aware of
+	// it being terminated.
+	if (child->is_active == true){
+		c_cap.signal = CLOS;
+		if ( write(pip1, &c_cap, sizeof(c_cap)) == -1 )
+			perror("Free child: send c_cap:CLOS to child");
 	}
 
-	// Tell client to establish the read connection on PORT2
-	memset(&p_cap,0,sizeof(p_cap));
-	p_cap.signal = PING;
-	p_cap.num = PORT2;
-	if ( (num_writ_bytes = send(client_sock_fd[1], &p_cap,
-					sizeof(p_cap), 0)) == -1 )
-		perror("child send to client");
+	printf("p3\n");
 
+	// Detach from shared memory
+	if ( shmdt(child) == -1 )
+		perror("Parent shmdt");
 
-	// Set up read connection
-	client_sock_fd[0] = accept(listen_sock_fd2,
-			(struct sockaddr *)&their_addr, &sin_size);
-	if (client_sock_fd[0] == -1) {
-		perror("accept send socket");
-		exit(EXIT_FAILURE);
-	}
+	printf("p4\n");
 
+	close(pip0);
+	close(pip1); // Should be last in func. Tells child we are ready to free()
 
-	printf("parent: read connection is set\n");
-
-	// Close the recently opened socket
-	close(listen_sock_fd2);
-
-	// Print successful connection to stdout
-	inet_ntop(their_addr.ss_family,
-			get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
-	printf("server: got connection from %s\n", s);
-
-	//  Network connection is now established
-	//  Now fork and set up pipes between parent and child
-
-	// Create pipes in two directions
-	if (pipe(pipe_fd1) == -1) {
-		perror("pipe");
-		exit(EXIT_FAILURE);
-	}
-	if (pipe(pipe_fd2) == -1) {
-		perror("pipe");
-		exit(EXIT_FAILURE);
-	}
-	printf("Pipes are set\n");
-
-	// Setup zombie reaper
-	sa.sa_handler = SIG_IGN;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_RESTART;
-	if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-		perror("sigaction");
-	}
-	printf("Zombie reaper is set\n");
-
-	/*	Child:
-	 *
-	 *	client_sock_fd[0]     read
-	 *	client_sock_fd[1]     write
-	 *	pipe_fd[0]			  read
-	 *	pipe_fd[1]			  write
-	 *
-	 *
-	 *	Parent:
-	 *
-	 *	pipe_fd[0]			  read
-	 *	pipe_fd[1]			  write
-	 */
-	// Create child process
-	if (!fork()) {
-
-		close(*listen_sock_fd); // Child doesn't need this
-
-		if ( (pipe_fd = (int *)calloc(2, sizeof(int))) == NULL ) {
-			perror("calloc");
-			exit(EXIT_FAILURE);
-		}
-		pipe_fd[0] = pipe_fd1[0];
-		pipe_fd[1] = pipe_fd2[1];
-		close(pipe_fd1[1]);
-		close(pipe_fd2[0]);
-		printf("child: pipes are linked\n");
-
-		// Child function starts here
-		child_proc(client_sock_fd, pipe_fd);
-
-		// Clean up after returned child process
-		memset(&s_cap,0,sizeof(s_capsule));
-		s_cap.signal = CLOS;
-		if ( (num_writ_bytes = write(pipe_fd[1], &s_cap, sizeof(s_cap))) == -1 )
-			perror("child write to server");
-		close(client_sock_fd[0]);
-		close(client_sock_fd[1]);
-		close(pipe_fd[0]);
-		close(pipe_fd[1]);
-		free(pipe_fd);
-		printf("connection from %s has been closed\n", s);
-
-		_Exit(EXIT_FAILURE);
-	}
-	printf("parent: child process is set\n");
-
-	close(client_sock_fd[0]);  // Parent doesn't need this
-	close(client_sock_fd[1]);  // Parent doesn't need this
-
-	if ( (pipe_fd = (int *)calloc(2, sizeof(int))) == NULL ) {
-		perror("pipe allocation");
-		exit(EXIT_FAILURE);
-	}
-	pipe_fd[0] = pipe_fd2[0];
-	pipe_fd[1] = pipe_fd1[1];
-	close(pipe_fd1[0]);
-	close(pipe_fd2[1]);
-
-	FD_SET(pipe_fd[0], set_fds);
-	dlist_insert(dlist_first(cli_list), pipe_fd);
-	if (pipe_fd[0] >= nfds)
-		nfds = pipe_fd[0] + 1;
-
-	printf("parent: pipes are linked\n");
-
-	return nfds;
-}
-
-// child_proc
-void child_proc(int *client_sock_fd, int pipe_fd[2]) {
-	struct timeval read_tv, set_tv = { .tv_sec = 0, .tv_usec = 50000 };
-	fd_set read_fds, set_fds;
-	int nfds = 0;				// Largest file descriptor + 1
-	int mfds = 0;				// Number of modified file descriptors
-	s_capsule s_cap;
-	m_capsule m_cap;
-	int32_t num_read_bytes = 0;     // Number of received bytes
-	int32_t num_writ_bytes = 0;     // Number of written bytes
-
-	FD_ZERO(&set_fds);						// Create set of file descriptors
-	FD_SET(client_sock_fd[0], &set_fds);    // Listen from connected client
-	FD_SET(pipe_fd[0], &set_fds);			// Listen from server
-
-	if (client_sock_fd[0] > pipe_fd[0])
-		nfds = client_sock_fd[0] + 1;
-	else
-		nfds = pipe_fd[0] + 1;
-
-	while(1) {
-		read_fds = set_fds;
-		read_tv = set_tv;
-
-		mfds = select(nfds, &read_fds, NULL, NULL, &read_tv);
-
-		// Error check
-		if (mfds == -1) {
-			if (strcmp(strerror(errno),"EINTR")) {
-				fprintf(stderr,"child select: EINTR\n");
-				continue;
-			}
-			perror("child select");
-			return;
-		}
-
-		// Transfer data from SERVER to CLIENT
-		if (FD_ISSET(pipe_fd[0], &read_fds)) {
-
-			// Read s_cap
-			if ( (num_read_bytes = read(pipe_fd[0], &s_cap,
-							sizeof(s_cap))) == -1 )
-				perror("child receive s_cap from server");
-			if (num_read_bytes != sizeof(s_cap))
-				fprintf(stderr,"s_cap: Not all data is read correctly!\nRead: %d\n"
-						"Size: %u\n",num_read_bytes,(unsigned int)sizeof(s_cap));
-
-
-			switch (s_cap.signal) {
-
-				// Exit client if parent process is closing
-				case CLOS :
-					return;
-
-					// Redirect incoming message from SERVER
-				case SIZE:
-
-					memset(&m_cap,0,sizeof(m_cap));
-
-					// Read m_cap from SERVER
-					if ( (num_read_bytes = read(pipe_fd[0], &m_cap,
-									s_cap.siz)) == -1 )
-						perror("child receive m_cap from server");
-					if (num_read_bytes != s_cap.siz)
-						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
-								"Read: %d\nSize: %u\n",num_read_bytes,(unsigned int)s_cap.siz);
-
-					// Send s_cap to CLIENT
-					if ( (num_writ_bytes = send(client_sock_fd[1], &s_cap,
-									sizeof(s_cap), 0)) == -1 )
-						perror("child send s_cap to client");
-					if (num_writ_bytes != sizeof(s_cap))
-						fprintf(stderr,"s_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
-
-					// Send m_cap to CLIENT
-					if ( (num_writ_bytes = send(client_sock_fd[1], &m_cap,
-									s_cap.siz, 0)) == -1 )
-						perror("child send to client");
-					if (num_writ_bytes != s_cap.siz)
-						fprintf(stderr,"m_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)s_cap.siz);
-
-					// Error check
-					if (num_read_bytes != num_writ_bytes) {
-						fprintf(stderr,"Child process could not transfer all "
-								"data correctly to client\n"
-								"Read: %d\nWrite: %u\n", num_read_bytes,(unsigned int)num_writ_bytes);
-						return;
-					}
-					break;
-
-				default :
-					break;
-			}
-		}
-
-		// Transfer data from CLIENT to SERVER
-		if (FD_ISSET(client_sock_fd[0], &read_fds)) {
-
-			// Receive s_cap from CLIENT
-			if ( (num_read_bytes = recv(client_sock_fd[0], &s_cap,
-							sizeof(s_cap), 0)) == -1)
-				perror("child receive s_cap from client");
-			if (num_read_bytes != sizeof(s_cap))
-				fprintf(stderr,"Not all data is received correctly!\nReceive: %d\n"
-						"Size: %u\n",num_read_bytes,(unsigned int)sizeof(s_cap));
-
-			// Check if connection is closed by client
-			if (num_read_bytes == 0)
-				return;
-
-			switch (s_cap.signal) {
-
-				// Exit client if parent is closing
-				case CLOS :
-					if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
-									sizeof(s_cap))) == -1 )
-						perror("child send s_cap:CLOS to server");
-					if (num_writ_bytes != sizeof(s_cap))
-						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
-								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
-					return;
-
-					// Respond to ping
-				case PING :
-					//TODO
-					break;
-
-				case SIZE:
-
-					// Read from CLIENT
-					memset(&m_cap,0,sizeof(m_cap));
-					if ( (num_read_bytes = recv(client_sock_fd[0], &m_cap,
-									s_cap.siz, 0)) == -1 )
-						perror("child receive m_cap from client");
-					if (num_read_bytes != s_cap.siz)
-						fprintf(stderr,"m_cap: Not all data is read correctly!\n"
-								"Read: %d\nSize: %u\n",num_read_bytes,(unsigned int)s_cap.siz);
-
-					// Write s_cap to SERVER
-					if ( (num_writ_bytes = write(pipe_fd[1], &s_cap,
-									sizeof(s_cap))) == -1 )
-						perror("child send s_cap:MESS to server");
-					if (num_writ_bytes != sizeof(s_cap))
-						fprintf(stderr,"s_cap: Not all data is written correctly!\n"
-								"Write: %d\nSize: %u\n",num_writ_bytes,(unsigned int)sizeof(s_cap));
-
-					// Write m_cap to SERVER
-					if ( (num_writ_bytes = write(pipe_fd[1], &m_cap,
-									s_cap.siz)) == -1 )
-						perror("child send m_cap to server");
-					if (num_writ_bytes != s_cap.siz)
-						fprintf(stderr,"m_cap: Not all data is sent correctly!\n"
-								"Send: %d\nSize: %u\n",num_writ_bytes,(unsigned int)s_cap.siz);
-
-					// Error check
-					if (num_read_bytes != num_writ_bytes) {
-						fprintf(stderr,"Child process could not transfer all "
-								"data correctly to server\n"
-								"Read: %d\nWrite: %u\n", num_read_bytes,(unsigned int)num_writ_bytes);
-						return;
-					}
-
-					// Print message
-					printf("%s: %s\n", m_cap.origin, m_cap.content);
-					break;
-
-				default :
-					break;
-			}
-		}
-	}
-}
-
-// free_child
-/* l: (dlist *) - A dlist_ptr containing elements of (int)pipe[2]
- * p: (dlist_position) - Position in l
- * s: (fd_set *) - pipe[0] is removed from this set
- *
- * - Removes an (int *) from a dlist
- * - Removes pipe[0] from fd_set
- * - Closes and frees pipes
- */
-void free_chld(dlist_position p, dlist *l, fd_set *s) {
-	int *pipe_fd = dlist_inspect(p);
-	FD_CLR(pipe_fd[0], s);
-	close(pipe_fd[0]);
-	close(pipe_fd[1]);
-	dlist_remove(l, p);
+	printf("p5\n");
 	return;
+}
+
+void free_child(child_data_chld *child) {
+	int shm_id = child->shm_id;
+
+	close(child->client_sock_fd[0]);
+	close(child->client_sock_fd[1]);
+	close(child->pipe_fd[0]);
+	close(child->pipe_fd[1]);
+
+	// Detach from shared memory
+	if ( shmdt(child) == -1 )
+		perror("Parent shmdt");
+
+	// Destroy shared memory
+	if ( shmctl(shm_id, IPC_RMID, NULL) == -1 )
+		perror("shmctl");
 }
 
 // get_in_addr
@@ -622,4 +784,3 @@ void *get_in_addr(struct sockaddr *sa) {
 	}
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-
